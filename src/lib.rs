@@ -54,16 +54,16 @@ mod waker_set;
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::future::Future;
-use std::hash::{Hash, BuildHasher};
+use std::hash::{BuildHasher, Hash};
 use std::mem;
 
-use dashmap::DashMap;
 use dashmap::mapref::entry::Entry::*;
 use dashmap::mapref::one;
+use dashmap::DashMap;
 
-use WaitEntry::*;
 use wait::{Wait, WaitMut};
 use waker_set::WakerSet;
+use WaitEntry::*;
 
 /// An asynchronous concurrent hashmap.
 pub struct WaitMap<K, V, S = RandomState> {
@@ -73,7 +73,9 @@ pub struct WaitMap<K, V, S = RandomState> {
 impl<K: Hash + Eq, V> WaitMap<K, V> {
     /// Make a new `WaitMap` using the default hasher.
     pub fn new() -> WaitMap<K, V> {
-        WaitMap { map: DashMap::with_hasher(RandomState::default()) }
+        WaitMap {
+            map: DashMap::with_hasher(RandomState::default()),
+        }
     }
 }
 
@@ -92,7 +94,9 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
     /// # }
     /// ```
     pub fn with_hasher(hasher: S) -> WaitMap<K, V, S> {
-        WaitMap { map: DashMap::with_hasher(hasher) }
+        WaitMap {
+            map: DashMap::with_hasher(hasher),
+        }
     }
 
     /// Inserts a key-value pair into the map.
@@ -122,17 +126,17 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
     /// ```
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         match self.map.entry(key) {
-            Occupied(mut entry)  => {
+            Occupied(mut entry) => {
                 match mem::replace(entry.get_mut(), Filled(value)) {
                     Waiting(wakers) => {
                         drop(entry); // drop early to release lock before waking other tasks
                         wakers.wake();
                         None
                     }
-                    Filled(value)   => Some(value),
+                    Filled(value) => Some(value),
                 }
             }
-            Vacant(slot)     => {
+            Vacant(slot) => {
                 slot.insert(Filled(value));
                 None
             }
@@ -140,19 +144,27 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
     }
 
     pub fn get<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<Ref<'_, K, V, S>>
-        where K: Borrow<Q>
+    where
+        K: Borrow<Q>,
     {
-        Some(Ref { inner: self.map.get(key)? })
+        Some(Ref {
+            inner: self.map.get(key)?,
+        })
     }
 
     pub fn get_mut<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> Option<RefMut<'_, K, V, S>>
-        where K: Borrow<Q>
+    where
+        K: Borrow<Q>,
     {
-        Some(RefMut { inner: self.map.get_mut(key)? })
+        Some(RefMut {
+            inner: self.map.get_mut(key)?,
+        })
     }
 
-    pub fn wait<'a: 'f, 'b: 'f, 'f, Q: ?Sized + Hash + Eq>(&'a self, qey: &'b Q)
-        -> impl Future<Output = Option<Ref<'a, K, V, S>>> + 'f
+    pub fn wait<'a: 'f, 'b: 'f, 'f, Q: ?Sized + Hash + Eq>(
+        &'a self,
+        qey: &'b Q,
+    ) -> impl Future<Output = Option<Ref<'a, K, V, S>>> + 'f
     where
         K: Borrow<Q> + From<&'b Q>,
     {
@@ -161,8 +173,10 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
         Wait::new(&self.map, qey)
     }
 
-    pub fn wait_mut<'a: 'f, 'b: 'f, 'f, Q: ?Sized + Hash + Eq>(&'a self, qey: &'b Q)
-        -> impl Future<Output = Option<RefMut<'a, K, V, S>>> + 'f
+    pub fn wait_mut<'a: 'f, 'b: 'f, 'f, Q: ?Sized + Hash + Eq>(
+        &'a self,
+        qey: &'b Q,
+    ) -> impl Future<Output = Option<RefMut<'a, K, V, S>>> + 'f
     where
         K: Borrow<Q> + From<&'b Q>,
     {
@@ -171,17 +185,61 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
         WaitMut::new(&self.map, qey)
     }
 
-    pub fn cancel<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> bool 
-        where K: Borrow<Q>
+    pub fn cancel<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
     {
-        if let Some((_, entry)) = self.map.remove_if(key, |_, entry| {
-            if let Waiting(_) = entry { true } else { false }
-        }) {
+        if let Some((_, entry)) =
+            self.map.remove_if(
+                key,
+                |_, entry| {
+                    if let Waiting(_) = entry {
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+        {
             if let Waiting(wakers) = entry {
                 wakers.wake();
             }
             true
-        } else { false }
+        } else {
+            false
+        }
+    }
+
+    pub fn remove<Q: ?Sized + Hash + Eq>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
+        if let Some((_, entry)) = self.map.remove(key) {
+            if let Waiting(wakers) = entry {
+                wakers.wake();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear(&self) {
+        self.map.retain(|_, v| {
+            if let Waiting(wakers) = v {
+                mem::replace(wakers, WakerSet::new()).wake();
+            }
+            false
+        });
+    }
+
+    pub fn clear_not_waiting(&self) {
+        self.map
+            .retain(|_, v| if let Waiting(_) = v { true } else { false });
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
     }
 
     /// Cancels all outstanding `waits` on the map.
@@ -221,7 +279,9 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
                 // have actually been removed.
                 mem::replace(wakers, WakerSet::new()).wake();
                 false
-            } else { true }
+            } else {
+                true
+            }
         })
     }
 }
@@ -262,8 +322,8 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> Ref<'a, K, V, S> {
 
     pub fn value(&self) -> &V {
         match self.inner.value() {
-            Filled(value)   => value,
-            _               => panic!()
+            Filled(value) => value,
+            _ => panic!(),
         }
     }
 
@@ -284,15 +344,15 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> RefMut<'a, K, V, S> {
 
     pub fn value(&self) -> &V {
         match self.inner.value() {
-            Filled(value)   => value,
-            _               => panic!()
+            Filled(value) => value,
+            _ => panic!(),
         }
     }
 
     pub fn value_mut(&mut self) -> &mut V {
         match self.inner.value_mut() {
-            Filled(value)   => value,
-            _               => panic!()
+            Filled(value) => value,
+            _ => panic!(),
         }
     }
 
@@ -302,8 +362,8 @@ impl<'a, K: Eq + Hash, V, S: BuildHasher> RefMut<'a, K, V, S> {
 
     pub fn pair_mut(&mut self) -> (&K, &mut V) {
         match self.inner.pair_mut() {
-            (key, Filled(value))    => (key, value),
-            _                       => panic!(),
+            (key, Filled(value)) => (key, value),
+            _ => panic!(),
         }
     }
 }
